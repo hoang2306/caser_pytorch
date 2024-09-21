@@ -9,6 +9,8 @@ from evaluation import evaluate_ranking
 from interactions import Interactions
 from utils import *
 
+from tqdm import tqdm 
+
 
 class Recommender(object):
     """
@@ -115,7 +117,7 @@ class Recommender(object):
 
         start_epoch = 0
 
-        for epoch_num in range(start_epoch, self._n_iter):
+        for epoch_num in tqdm(range(start_epoch, self._n_iter)):
 
             t1 = time()
 
