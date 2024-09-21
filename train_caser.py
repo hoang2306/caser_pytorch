@@ -12,6 +12,14 @@ from utils import *
 from tqdm import tqdm 
 from torch.utils.data import DataLoader, TensorDataset
 
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+from torch import nn, optim
+import numpy as np
+from time import time
+from tqdm import tqdm
+from multiprocessing import Pool
+
 
 
 class Recommender(object):
@@ -87,85 +95,74 @@ class Recommender(object):
                                      weight_decay=self._l2,
                                      lr=self._learning_rate)
 
+
+
     def fit(self, train, test, verbose=False):
         """
-        The general training loop to fit the model
-
-        Parameters
-        ----------
-
-        train: :class:`spotlight.interactions.Interactions`
-            training instances, also contains test sequences
-        test: :class:`spotlight.interactions.Interactions`
-            only contains targets for test sequences
-        verbose: bool, optional
-            print the logs
+        The general training loop to fit the model.
         """
 
-        # convert to sequences, targets and users
+        # Convert to sequences, targets and users
         sequences_np = train.sequences.sequences
         targets_np = train.sequences.targets
         users_np = train.sequences.user_ids.reshape(-1, 1)
-
+        
         L, T = train.sequences.L, train.sequences.T
-
         n_train = sequences_np.shape[0]
-
-        output_str = 'total training instances: %d' % n_train
-        print(output_str)
+        
+        if verbose:
+            print(f"Total training instances: {n_train}")
 
         if not self._initialized:
             self._initialize(train)
 
         start_epoch = 0
 
-        print(f"run negative sampling process")
+        # Negative sampling
+        print("Starting negative sampling...")
         negatives_np = self._generate_negative_samples(users_np, train, n=self._neg_samples)
-        print(f"done negative sampling process")
+        print("Negative sampling completed.")
 
-        train_dataset = TensorDataset(torch.from_numpy(users_np).long(),
-                                  torch.from_numpy(sequences_np).long(),
-                                  torch.from_numpy(targets_np).long(),
-                                  torch.from_numpy(negatives_np).long())    
+        # TensorDataset & DataLoader
+        train_dataset = TensorDataset(
+            torch.from_numpy(users_np).long(),
+            torch.from_numpy(sequences_np).long(),
+            torch.from_numpy(targets_np).long(),
+            torch.from_numpy(negatives_np).long()
+        )
 
-        print(f"start push data into DataLoader")
-        train_loader = DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True)
-        print(f"done push data into DataLoader")
+        # Use num_workers for parallel data loading
+        train_loader = DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
         for epoch_num in tqdm(range(start_epoch, self._n_iter)):
-
             t1 = time()
-
-            # set model to training mode
-            self._net.train()
+            self._net.train()  # Set model to training mode
 
             epoch_loss = 0.0
 
             for (minibatch_num, (batch_users, batch_sequences, batch_targets, batch_negatives)) in enumerate(train_loader):
-            
-                # Move batches to device
+                # Move batches to device once
                 batch_users, batch_sequences, batch_targets, batch_negatives = (
-                    batch_users.to(self._device),
-                    batch_sequences.to(self._device),
-                    batch_targets.to(self._device),
-                    batch_negatives.to(self._device)
+                    batch_users.to(self._device, non_blocking=True),
+                    batch_sequences.to(self._device, non_blocking=True),
+                    batch_targets.to(self._device, non_blocking=True),
+                    batch_negatives.to(self._device, non_blocking=True)
                 )
 
+                # Forward pass
                 items_to_predict = torch.cat((batch_targets, batch_negatives), 1)
-                items_prediction = self._net(batch_sequences,
-                                            batch_users,
-                                            items_to_predict)
+                items_prediction = self._net(batch_sequences, batch_users, items_to_predict)
 
-                # Split the prediction into positive and negative parts
-                targets_prediction, negatives_prediction = torch.split(items_prediction,
-                                                                    [batch_targets.size(1), 
-                                                                        batch_negatives.size(1)], dim=1)
+                # Split positive and negative predictions
+                targets_prediction, negatives_prediction = torch.split(
+                    items_prediction, [batch_targets.size(1), batch_negatives.size(1)], dim=1
+                )
 
                 self._optimizer.zero_grad()
 
-                # compute the binary cross-entropy loss
-                positive_loss = -torch.mean(torch.log(torch.sigmoid(targets_prediction)))
-                negative_loss = -torch.mean(torch.log(1 - torch.sigmoid(negatives_prediction)))
+                # Compute the binary cross-entropy loss
+                positive_loss = -torch.mean(torch.log(torch.sigmoid(targets_prediction) + 1e-8))
+                negative_loss = -torch.mean(torch.log(1 - torch.sigmoid(negatives_prediction) + 1e-8))
                 loss = positive_loss + negative_loss
 
                 epoch_loss += loss.item()
@@ -174,61 +171,47 @@ class Recommender(object):
                 self._optimizer.step()
 
             epoch_loss /= minibatch_num + 1
-
             t2 = time()
+
+            # Log every 10 epochs for better performance
             if verbose and (epoch_num + 1) % 10 == 0:
                 precision, recall, mean_aps = evaluate_ranking(self, test, train, k=[1, 5, 10])
-                output_str = "Epoch %d [%.1f s]\tloss=%.4f, map=%.4f, " \
-                             "prec@1=%.4f, prec@5=%.4f, prec@10=%.4f, " \
-                             "recall@1=%.4f, recall@5=%.4f, recall@10=%.4f, [%.1f s]" % (epoch_num + 1,
-                                                                                         t2 - t1,
-                                                                                         epoch_loss,
-                                                                                         mean_aps,
-                                                                                         np.mean(precision[0]),
-                                                                                         np.mean(precision[1]),
-                                                                                         np.mean(precision[2]),
-                                                                                         np.mean(recall[0]),
-                                                                                         np.mean(recall[1]),
-                                                                                         np.mean(recall[2]),
-                                                                                         time() - t2)
+                output_str = (f"Epoch {epoch_num + 1} [{t2 - t1:.1f} s]\tloss={epoch_loss:.4f}, "
+                            f"map={mean_aps:.4f}, prec@1={np.mean(precision[0]):.4f}, "
+                            f"prec@5={np.mean(precision[1]):.4f}, prec@10={np.mean(precision[2]):.4f}, "
+                            f"recall@1={np.mean(recall[0]):.4f}, recall@5={np.mean(recall[1]):.4f}, "
+                            f"recall@10={np.mean(recall[2]):.4f}, [{time() - t2:.1f} s]")
                 print(output_str)
             else:
-                output_str = "Epoch %d [%.1f s]\tloss=%.4f [%.1f s]" % (epoch_num + 1,
-                                                                        t2 - t1,
-                                                                        epoch_loss,
-                                                                        time() - t2)
+                output_str = f"Epoch {epoch_num + 1} [{t2 - t1:.1f} s]\tloss={epoch_loss:.4f} [{time() - t2:.1f} s]"
                 print(output_str)
+
 
     def _generate_negative_samples(self, users, interactions, n):
         """
-        Sample negative from a candidate set of each user. The
-        candidate set of each user is defined by:
-        {All Items} \ {Items Rated by User}
-
-        Parameters
-        ----------
-
-        users: array of np.int64
-            sequence users
-        interactions: :class:`spotlight.interactions.Interactions`
-            training instances, used for generate candidates
-        n: int
-            total number of negatives to sample for each sequence
+        Parallelized negative sampling.
         """
 
         users_ = users.squeeze()
         negative_samples = np.zeros((users_.shape[0], n), np.int64)
+
         if not self._candidate:
             all_items = np.arange(interactions.num_items - 1) + 1  # 0 for padding
             train = interactions.tocsr()
             for user, row in enumerate(train):
                 self._candidate[user] = list(set(all_items) - set(row.indices))
 
-        for i, u in enumerate(users_):
-            for j in range(n):
-                x = self._candidate[u]
-                negative_samples[i, j] = x[
-                    np.random.randint(len(x))]
+        def sample_negative_for_user(i_u):
+            i, u = i_u
+            negatives = [self._candidate[u][np.random.randint(len(self._candidate[u]))] for _ in range(n)]
+            return i, negatives
+
+        # Parallelize negative sample generation
+        with Pool(processes=4) as pool:
+            results = pool.map(sample_negative_for_user, enumerate(users_))
+
+        for i, negatives in results:
+            negative_samples[i] = negatives
 
         return negative_samples
 
