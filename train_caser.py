@@ -119,13 +119,18 @@ class Recommender(object):
 
         start_epoch = 0
 
+        print(f"run negative sampling process")
         negatives_np = self._generate_negative_samples(users_np, train, n=self._neg_samples)
+        print(f"done negative sampling process")
+
         train_dataset = TensorDataset(torch.from_numpy(users_np).long(),
                                   torch.from_numpy(sequences_np).long(),
                                   torch.from_numpy(targets_np).long(),
-                                  torch.from_numpy(negatives_np).long())
+                                  torch.from_numpy(negatives_np).long())    
 
+        print(f"start push data into DataLoader")
         train_loader = DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True)
+        print(f"done push data into DataLoader")
 
         for epoch_num in tqdm(range(start_epoch, self._n_iter)):
 
