@@ -18,7 +18,6 @@ class Recommender(object):
     sampling: for any known tuple of (user, sequence, targets), one or more
     items are randomly sampled to act as negatives.
 
-
     Parameters
     ----------
 
@@ -281,8 +280,8 @@ class Recommender(object):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # data arguments
-    parser.add_argument('--train_root', type=str, default='datasets/ml1m/test/train.txt')
-    parser.add_argument('--test_root', type=str, default='datasets/ml1m/test/test.txt')
+    parser.add_argument('--train_root', type=str, default='datasets/pog/test/train.txt')
+    parser.add_argument('--test_root', type=str, default='datasets/pog/test/test.txt')
     parser.add_argument('--L', type=int, default=5)
     parser.add_argument('--T', type=int, default=3)
     # train arguments
