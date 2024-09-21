@@ -10,6 +10,8 @@ from interactions import Interactions
 from utils import *
 
 from tqdm import tqdm 
+from torch.utils.data import DataLoader, TensorDataset
+
 
 
 class Recommender(object):
@@ -117,6 +119,14 @@ class Recommender(object):
 
         start_epoch = 0
 
+        negatives_np = self._generate_negative_samples(users_np, train, n=self._neg_samples)
+        train_dataset = TensorDataset(torch.from_numpy(users_np).long(),
+                                  torch.from_numpy(sequences_np).long(),
+                                  torch.from_numpy(targets_np).long(),
+                                  torch.from_numpy(negatives_np).long())
+
+        train_loader = DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True)
+
         for epoch_num in tqdm(range(start_epoch, self._n_iter)):
 
             t1 = time()
@@ -124,50 +134,33 @@ class Recommender(object):
             # set model to training mode
             self._net.train()
 
-            users_np, sequences_np, targets_np = shuffle(users_np,
-                                                         sequences_np,
-                                                         targets_np)
-
-            negatives_np = self._generate_negative_samples(users_np, train, n=self._neg_samples)
-
-            # convert numpy arrays to PyTorch tensors and move it to the corresponding devices
-            users, sequences, targets, negatives = (torch.from_numpy(users_np).long(),
-                                                    torch.from_numpy(sequences_np).long(),
-                                                    torch.from_numpy(targets_np).long(),
-                                                    torch.from_numpy(negatives_np).long())
-
-            users, sequences, targets, negatives = (users.to(self._device),
-                                                    sequences.to(self._device),
-                                                    targets.to(self._device),
-                                                    negatives.to(self._device))
-
             epoch_loss = 0.0
 
-            for (minibatch_num,
-                 (batch_users,
-                  batch_sequences,
-                  batch_targets,
-                  batch_negatives)) in enumerate(minibatch(users,
-                                                           sequences,
-                                                           targets,
-                                                           negatives,
-                                                           batch_size=self._batch_size)):
+            for (minibatch_num, (batch_users, batch_sequences, batch_targets, batch_negatives)) in enumerate(train_loader):
+            
+                # Move batches to device
+                batch_users, batch_sequences, batch_targets, batch_negatives = (
+                    batch_users.to(self._device),
+                    batch_sequences.to(self._device),
+                    batch_targets.to(self._device),
+                    batch_negatives.to(self._device)
+                )
+
                 items_to_predict = torch.cat((batch_targets, batch_negatives), 1)
                 items_prediction = self._net(batch_sequences,
-                                             batch_users,
-                                             items_to_predict)
+                                            batch_users,
+                                            items_to_predict)
 
-                (targets_prediction,
-                 negatives_prediction) = torch.split(items_prediction,
-                                                     [batch_targets.size(1),
-                                                      batch_negatives.size(1)], dim=1)
+                # Split the prediction into positive and negative parts
+                targets_prediction, negatives_prediction = torch.split(items_prediction,
+                                                                    [batch_targets.size(1), 
+                                                                        batch_negatives.size(1)], dim=1)
 
                 self._optimizer.zero_grad()
+
                 # compute the binary cross-entropy loss
-                positive_loss = -torch.mean(
-                    torch.log(torch.sigmoid(targets_prediction)))
-                negative_loss = -torch.mean(
-                    torch.log(1 - torch.sigmoid(negatives_prediction)))
+                positive_loss = -torch.mean(torch.log(torch.sigmoid(targets_prediction)))
+                negative_loss = -torch.mean(torch.log(1 - torch.sigmoid(negatives_prediction)))
                 loss = positive_loss + negative_loss
 
                 epoch_loss += loss.item()
